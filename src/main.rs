@@ -39,7 +39,7 @@ const PORT_B: u16 = 0x02;
 
 const BUF_SIZE: usize = 16384;
 
-struct Device(Receiver<Vec<u8>>);
+struct Device(Receiver<Option<Vec<u8>>>);
 
 impl Device {
     fn new(context: libusb::Context, bitstream: Vec<u8>, mut record: Option<File>) -> Device {
@@ -68,24 +68,30 @@ impl Device {
             loop {
                 let mut buf = Vec::new();
                 buf.resize(BUF_SIZE, 0);
-                let size = handle.read_bulk(0x86, &mut buf[..], Duration::from_millis(100))
-                                 .expect("cannot read buffer");
-                buf.resize(size, 0);
-                if let Some(file) = record.as_mut() {
-                    let elapsed = now.elapsed().unwrap();
-                    now = SystemTime::now();
+                match handle.read_bulk(0x86, &mut buf[..], Duration::from_millis(100)) {
+                    Ok(size) => {
+                        buf.resize(size, 0);
+                        if let Some(file) = record.as_mut() {
+                            let elapsed = now.elapsed().unwrap();
+                            now = SystemTime::now();
 
-                    file.write_u32::<NetworkEndian>(elapsed.subsec_nanos())
-                        .expect("cannot write recording");
-                    file.write_u32::<NetworkEndian>(buf.len() as u32)
-                        .expect("cannot write recording");
-                    file.write(&buf[..])
-                        .expect("cannot write recording");
-                    file.flush()
-                        .expect("cannot flush recording");
+                            file.write_u32::<NetworkEndian>(elapsed.subsec_nanos())
+                                .expect("cannot write recording");
+                            file.write_u32::<NetworkEndian>(buf.len() as u32)
+                                .expect("cannot write recording");
+                            file.write(&buf[..])
+                                .expect("cannot write recording");
+                            file.flush()
+                                .expect("cannot flush recording");
+                        }
+                        sender.send(Some(buf))
+                              .expect("cannot send buffer");
+                    }
+                    Err(_) => {
+                        sender.send(None)
+                              .expect("cannot send buffer");
+                    }
                 }
-                sender.send(buf)
-                      .expect("cannot send buffer");
             }
         });
 
@@ -98,7 +104,7 @@ impl Device {
             loop {
                 match file.read_u32::<NetworkEndian>() {
                     Ok(nanos) => thread::sleep(Duration::from_nanos(nanos as u64)),
-                    Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => (),
+                    Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
                     r => { r.expect("cannot read recording"); () }
                 }
                 let length = file.read_u32::<NetworkEndian>()
@@ -106,7 +112,12 @@ impl Device {
                 let mut data = Vec::new();
                 data.resize(length, 0);
                 file.read(&mut data[..]).expect("cannot read recording");
-                sender.send(data)
+                sender.send(Some(data))
+                      .expect("cannot send buffer");
+            }
+            loop {
+                thread::sleep(Duration::from_millis(100));
+                sender.send(None)
                       .expect("cannot send buffer");
             }
         });
@@ -118,9 +129,16 @@ impl Device {
 impl Read for Device {
     fn read(&mut self, dst_buf: &mut [u8]) -> io::Result<usize> {
         let src_buf = self.0.recv().expect("cannot receive buffer");
-        assert!(dst_buf.len() >= src_buf.len());
-        dst_buf[..src_buf.len()].copy_from_slice(&src_buf[..]);
-        Ok(src_buf.len())
+        match src_buf {
+            Some(src_buf) => {
+                assert!(dst_buf.len() >= src_buf.len());
+                dst_buf[..src_buf.len()].copy_from_slice(&src_buf[..]);
+                Ok(src_buf.len())
+            }
+            None => {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "no data received"))
+            }
+        }
     }
 }
 
@@ -146,30 +164,30 @@ impl<R: Read> VideoStream<R> {
         VideoStream { reader, sync_byte: None, pitch }
     }
 
-    fn read_byte(&mut self) -> u8 {
+    fn read_byte(&mut self) -> io::Result<u8> {
         if let Some(byte) = self.sync_byte.take() {
-            return byte
+            return Ok(byte)
         }
 
         let mut byte = 0u8;
-        self.reader.read(slice::from_mut(&mut byte)).expect("cannot read");
-        byte
+        self.reader.read(slice::from_mut(&mut byte))?;
+        Ok(byte)
     }
 
-    fn read_data_byte(&mut self) -> Result<u8, ()> {
-        let byte = self.read_byte();
+    fn read_data_byte(&mut self) -> io::Result<u8> {
+        let byte = self.read_byte()?;
         if byte & 0x80 == 0 {
             Ok(byte)
         } else {
             self.sync_byte = Some(byte);
-            Err(())
+            Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected sync byte"))
         }
     }
 
-    fn read_header(&mut self) -> Result<Header, ()> {
+    fn read_header(&mut self) -> io::Result<Header> {
         let mut sync = 0u8;
         while sync & 0x80 == 0 {
-            sync = self.read_byte();
+            sync = self.read_byte()?;
         }
         let overflow = (sync & 0x40) >> 7;
         let n_frame  = (sync & 0x3e) >> 1;
@@ -181,7 +199,7 @@ impl<R: Read> VideoStream<R> {
         })
     }
 
-    fn read_scanline(&mut self) -> Result<Scanline, ()> {
+    fn read_scanline(&mut self) -> io::Result<Scanline> {
         let header = self.read_header()?;
         let mut data = vec![0; self.pitch];
         for pixel in data.chunks_mut(3) {
@@ -400,7 +418,34 @@ fn main() {
 
                 framebuffer[n_row * pitch..(n_row + 1) * pitch].copy_from_slice(&data[..]);
             }
-            Err(()) => {
+            Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
+                let mut row = Vec::new();
+                row.resize(pitch, 0);
+                for (i, color) in [
+                    [0xff, 0xff, 0xff],
+                    [0xff, 0xff, 0x00],
+                    [0x00, 0xff, 0xff],
+                    [0x00, 0xff, 0x00],
+                    [0xff, 0x00, 0xff],
+                    [0xff, 0x00, 0x00],
+                    [0x00, 0x00, 0xff],
+                    [0x00, 0x00, 0x00],
+                ].iter().enumerate() {
+                    for j in 0..pitch / 24 {
+                        row[i * pitch / 8 + j * 3..
+                            i * pitch / 8 + (j + 1) * 3].copy_from_slice(color);
+                    }
+                }
+
+                for n_row in 0..height {
+                    framebuffer[n_row * pitch..(n_row + 1) * pitch].copy_from_slice(&row[..]);
+                }
+
+                if let Some(ref mut sdl_renderer) = sdl_video {
+                    sdl_renderer(&framebuffer);
+                }
+            }
+            Err(_) => {
                 print!("stream synchronization lost\n");
                 current_n_row = height - 1;
             }
