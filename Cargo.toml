@@ -11,6 +11,7 @@ toml = "0.4"
 libusb = "0.3"
 sdl2 = "0.31"
 gif = "0.10"
+x264 = { version = "0.3", optional = true }
 
 [profile.release]
 panic = "abort"

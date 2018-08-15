@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 #[macro_use]
 extern crate serde_derive;
@@ -7,13 +7,15 @@ extern crate toml;
 extern crate libusb;
 extern crate sdl2;
 extern crate gif;
+#[cfg(feature = "x264")]
+extern crate x264;
 
 use std::slice;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 use std::io::{self, Read, BufReader, Write};
 use std::fs::{self, File};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::sync::mpsc::{channel, Sender, Receiver};
 use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 
@@ -79,7 +81,7 @@ impl Device {
                                 .expect("cannot write recording");
                             file.write_u32::<NetworkEndian>(buf.len() as u32)
                                 .expect("cannot write recording");
-                            file.write(&buf[..])
+                            file.write_all(&buf[..])
                                 .expect("cannot write recording");
                             file.flush()
                                 .expect("cannot flush recording");
@@ -296,7 +298,7 @@ fn spawn_gif_encoder(width: usize, height: usize, framedrop: u8,
                      filename: &str) -> Sender<Vec<u8>> {
     use gif::{Encoder, Parameter, Repeat, Frame};
 
-    let image = File::create(filename).expect("cannot open file");
+    let image = File::create(filename).expect("cannot open GIF file");
     let mut encoder = Encoder::new(image, width as u16, height as u16, &[])
                               .expect("cannot create GIF encoder");
     Repeat::Infinite.set_param(&mut encoder)
@@ -316,6 +318,49 @@ fn spawn_gif_encoder(width: usize, height: usize, framedrop: u8,
         }
     });
     sender
+}
+
+#[cfg(feature = "x264")]
+fn spawn_x264_encoder(width: i32, height: i32, filename: &str)
+                     -> (Sender<Vec<u8>>, JoinHandle<()>) {
+    use x264::{Colorspace, Setup, Image, Preset, Tune};
+
+    let mut file = File::create(filename).expect("cannot open H.264 file");
+
+    let (sender, receiver): (Sender<Vec<u8>>, _) = channel();
+    let thread = thread::spawn(move || {
+        let mut encoder = Setup::preset(Preset::Veryslow, Tune::Animation, false, false)
+            .fps(597, 10)
+            .build(Colorspace::RGB, width, height)
+            .expect("cannot create H.264 encoder");
+
+        {
+            let headers = encoder.headers().expect("cannot get H.264 headers");
+            file.write_all(headers.entirety()).expect("cannot write H.264 headers");
+        }
+
+        let mut n = 0;
+        loop {
+            match receiver.recv() {
+                Ok(framebuffer) => {
+                    let image = Image::rgb(width, height, &framebuffer);
+                    let (data, _) = encoder.encode(n, image).unwrap();
+                    file.write_all(data.entirety()).expect("cannot write H.264 frame");
+                    n += 1;
+                }
+                Err(_) => break
+            }
+        }
+
+        {
+            let mut flush = encoder.flush();
+            while let Some(result) = flush.next() {
+                let (data, _) = result.expect("cannot flush H.264 frame");
+                file.write_all(data.entirety()).expect("cannot write H.264 delayed frame");
+            }
+        }
+    });
+    (sender, thread)
 }
 
 use sdl2::event::Event;
@@ -368,6 +413,17 @@ fn main() {
             gif_video = Some(spawn_gif_encoder(width, height, framedrop, &filename))
     }
 
+    #[cfg(feature = "x264")]
+    let mut h264_video;
+    #[cfg(feature = "x264")]
+    match config.video.h264 {
+        None =>
+            h264_video = None,
+
+        Some(H264VideoConfig { filename }) =>
+            h264_video = Some(spawn_x264_encoder(width as i32, height as i32, &filename))
+    }
+
     let mut current_n_frame = 0;
     let mut current_n_row = 0;
     let mut framebuffer = vec![0u8; pitch * height];
@@ -413,6 +469,13 @@ fn main() {
                         gif_encoder.send(full_frame.clone())
                                    .expect("cannot encode GIF frame");
                     }
+
+                    #[cfg(feature = "x264")] {
+                        if let Some((ref mut h264_encoder, _)) = h264_video {
+                            h264_encoder.send(full_frame.clone())
+                                       .expect("cannot encode H.264 frame");
+                        }
+                    }
                 }
                 current_n_frame = n_frame;
 
@@ -456,6 +519,13 @@ fn main() {
                 Event::Quit {..} => break 'run,
                 _ => ()
             }
+        }
+    }
+
+    #[cfg(feature = "x264")] {
+        if let Some((h264_encoder, h264_thread)) = h264_video {
+            drop(h264_encoder);
+            h264_thread.join().expect("cannot join H.264 thread");
         }
     }
 }

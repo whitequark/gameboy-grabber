@@ -23,13 +23,16 @@ height = 160
 # Play audio via speakers.
 # [audio.sdl]
 
-# [video.gif]
 # Record frames to an animated gif file.
+# [video.gif]
 # filename = "capture.gif"
 # Drop every N-th frame (N < 32).
 # framedrop = 0
 
 # Record frames to an H.264 stream.
+# This stream has an RGB colorspace and is not in a container; it needs to be
+# post-processed with e.g. ffmpeg to convert colorspace to YUV and put it
+# into a container.
 # [video.h264]
 # filename = "capture.h264"
 
