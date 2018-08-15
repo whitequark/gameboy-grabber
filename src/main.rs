@@ -2,17 +2,20 @@
 
 #[macro_use]
 extern crate serde_derive;
+extern crate byteorder;
 extern crate toml;
 extern crate libusb;
 extern crate sdl2;
 extern crate gif;
 
 use std::slice;
-use std::time::Duration;
-use std::io::{self, Read, BufReader};
+use std::collections::BTreeMap;
+use std::time::{Duration, SystemTime};
+use std::io::{self, Read, BufReader, Write};
 use std::fs::{self, File};
 use std::thread;
 use std::sync::mpsc::{channel, Sender, Receiver};
+use byteorder::{NetworkEndian, ReadBytesExt, WriteBytesExt};
 
 const VID_QIHW: u16        = 0x20b7;
 const PID_GLASGOW: u16     = 0x9db1;
@@ -34,10 +37,12 @@ const REQ_LIMIT_VOLT: u8   = 0x1A;
 const PORT_A: u16 = 0x01;
 const PORT_B: u16 = 0x02;
 
+const BUF_SIZE: usize = 16384;
+
 struct Device(Receiver<Vec<u8>>);
 
 impl Device {
-    fn new(context: libusb::Context, bitstream: Vec<u8>) -> Device {
+    fn new(context: libusb::Context, bitstream: Vec<u8>, mut record: Option<File>) -> Device {
         let (sender, receiver) = channel();
         thread::spawn(move || {
             let mut handle = context.open_device_with_vid_pid(VID_QIHW, PID_GLASGOW)
@@ -59,12 +64,49 @@ impl Device {
                   .unwrap_or(/* ok if it didn't work */());
             handle.claim_interface(0)
                   .expect("cannot claim interface");
+            let mut now = SystemTime::now();
             loop {
                 let mut buf = Vec::new();
-                buf.resize(512, 0);
-                handle.read_bulk(0x86, &mut buf[..], Duration::from_millis(100))
-                      .expect("cannot read buffer");
+                buf.resize(BUF_SIZE, 0);
+                let size = handle.read_bulk(0x86, &mut buf[..], Duration::from_millis(100))
+                                 .expect("cannot read buffer");
+                buf.resize(size, 0);
+                if let Some(file) = record.as_mut() {
+                    let elapsed = now.elapsed().unwrap();
+                    now = SystemTime::now();
+
+                    file.write_u32::<NetworkEndian>(elapsed.subsec_nanos())
+                        .expect("cannot write recording");
+                    file.write_u32::<NetworkEndian>(buf.len() as u32)
+                        .expect("cannot write recording");
+                    file.write(&buf[..])
+                        .expect("cannot write recording");
+                    file.flush()
+                        .expect("cannot flush recording");
+                }
                 sender.send(buf)
+                      .expect("cannot send buffer");
+            }
+        });
+
+        Device(receiver)
+    }
+
+    fn new_replay(mut file: File) -> Device {
+        let (sender, receiver) = channel();
+        thread::spawn(move || {
+            loop {
+                match file.read_u32::<NetworkEndian>() {
+                    Ok(nanos) => thread::sleep(Duration::from_nanos(nanos as u64)),
+                    Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => (),
+                    r => { r.expect("cannot read recording"); () }
+                }
+                let length = file.read_u32::<NetworkEndian>()
+                                 .expect("cannot read recording") as usize;
+                let mut data = Vec::new();
+                data.resize(length, 0);
+                file.read(&mut data[..]).expect("cannot read recording");
+                sender.send(data)
                       .expect("cannot send buffer");
             }
         });
@@ -153,11 +195,25 @@ impl<R: Read> VideoStream<R> {
 
 #[derive(Debug, Default, Deserialize)]
 struct Config {
+    #[serde(rename = "device-type")]
+    device_type: String,
+    device: BTreeMap<String, DeviceConfig>,
+    stream: StreamConfig,
+    video: VideoConfig,
+    // audio: AudioConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DeviceConfig {
     bitstream: String,
     width: usize,
     height: usize,
-    video: VideoConfig,
-    // audio: AudioConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StreamConfig {
+    record: Option<String>,
+    replay: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -251,12 +307,24 @@ fn main() {
     let config_file = fs::read_to_string("config.toml").expect("cannot open config.toml");
     let config: Config = toml::from_str(&config_file).expect("cannot parse config");
 
-    let (width, height) = (config.width, config.height);
+    let device = &config.device[&config.device_type];
+
+    let (width, height) = (device.width, device.height);
     let pitch = width * 3;
 
+    let bitstream = fs::read(&device.bitstream).expect("cannot read bitstream");
+    let record_file = config.stream.record.map(|filename|
+        File::create(filename).expect("cannot open record file"));
+
     let context = libusb::Context::new().unwrap();
-    let device = Device::new(context, fs::read(config.bitstream).expect("cannot read bitstream"));
-    let mut reader = VideoStream::new(BufReader::with_capacity(512, device), pitch);
+    let device = match config.stream.replay {
+        Some(filename) => {
+            let replay_file = File::open(filename).expect("cannot open replay file");
+            Device::new_replay(replay_file)
+        }
+        None => Device::new(context, bitstream, record_file)
+    };
+    let mut reader = VideoStream::new(BufReader::with_capacity(BUF_SIZE, device), pitch);
 
     let sdl_context = sdl2::init().expect("cannot initialize SDL");
     let mut event_pump = sdl_context

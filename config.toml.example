@@ -1,11 +1,19 @@
-# For CGB:
-# bitstream = "bitstream/cgb.bin"
-# width = 160
-# height = 144
-# For GBA:
-# bitstream = "bitstream/gba.bin"
-# width = 240
-# height = 160
+device-type = "cgb"
+
+[device.cgb]
+bitstream = "bitstream/cgb.bin"
+width = 160
+height = 144
+
+[device.gba]
+bitstream = "bitstream/gba.bin"
+width = 240
+height = 160
+
+# Record or replay raw data received from device.
+# [stream]
+# record = "stream.bin"
+# replay = "stream.bin"
 
 # Display frames on screen.
 # [video.sdl]
