@@ -1,0 +1,40 @@
+# MSVC x32
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-L=vendor/win32/SDL2-2.0.8-MS/lib/x32"]
+
+[target.i686-pc-windows-msvc."usb-1.0"]
+rustc-link-search = ["vendor/win32/libusb-1.0.22/MS32/dll"]
+rustc-link-lib = ["libusb-1.0"]
+
+# MSVC x64
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-L=vendor/win32/SDL2-2.0.8-MS/lib/x64"]
+
+[target.x86_64-pc-windows-msvc."usb-1.0"]
+rustc-link-search = ["vendor/win32/libusb-1.0.22/MS64/dll"]
+rustc-link-lib = ["libusb-1.0"]
+
+# MinGW x32
+
+[target.i686-pc-windows-gnu]
+ar = "i686-w64-mingw32-ar"
+linker = "i686-w64-mingw32-gcc"
+rustflags = ["-L=vendor/win32/SDL2-2.0.8-MinGW/i686-w64-mingw32/lib"]
+
+[target.i686-pc-windows-gnu."usb-1.0"]
+rustc-link-search = ["vendor/win32/libusb-1.0.22/MinGW32/dll"]
+rustc-link-lib = ["libusb-1.0"]
+
+# MinGW x64
+
+[target.x86_64-pc-windows-gnu]
+ar = "x86_64-w64-mingw32-ar"
+linker = "x86_64-w64-mingw32-gcc"
+rustflags = ["-L=vendor/win32/SDL2-2.0.8-MinGW/x86_64-w64-mingw32/lib"]
+
+[target.x86_64-pc-windows-gnu."usb-1.0"]
+rustc-link-search = ["vendor/win32/libusb-1.0.22/MinGW64/dll"]
+rustc-link-lib = ["libusb-1.0"]
+
