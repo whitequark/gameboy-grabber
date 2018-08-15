@@ -1,10 +1,11 @@
-#![allow(dead_code, unused_imports)]
+#![allow(dead_code)]
 
 #[macro_use]
 extern crate serde_derive;
 extern crate byteorder;
 extern crate toml;
 extern crate libusb;
+extern crate flate2;
 extern crate sdl2;
 extern crate gif;
 #[cfg(feature = "x264")]
@@ -44,9 +45,10 @@ const BUF_SIZE: usize = 16384;
 struct Device(Receiver<Option<Vec<u8>>>);
 
 impl Device {
-    fn new(context: libusb::Context, bitstream: Vec<u8>, mut record: Option<File>) -> Device {
+    fn new(context: libusb::Context, bitstream: Vec<u8>, record: Option<File>)
+          -> (Device, JoinHandle<()>) {
         let (sender, receiver) = channel();
-        thread::spawn(move || {
+        let thread = thread::spawn(move || {
             let mut handle = context.open_device_with_vid_pid(VID_QIHW, PID_GLASGOW)
                                     .expect("cannot open device");
             handle.write_control(REQ_TYPE_VENDOR, REQ_IO_VOLT, 0x00, PORT_A|PORT_B,
@@ -66,6 +68,11 @@ impl Device {
                   .unwrap_or(/* ok if it didn't work */());
             handle.claim_interface(0)
                   .expect("cannot claim interface");
+
+            let mut gzip = record.map(|file| {
+                flate2::write::GzEncoder::new(file, flate2::Compression::fast())
+            });
+
             let mut now = SystemTime::now();
             loop {
                 let mut buf = Vec::new();
@@ -73,47 +80,55 @@ impl Device {
                 match handle.read_bulk(0x86, &mut buf[..], Duration::from_millis(100)) {
                     Ok(size) => {
                         buf.resize(size, 0);
-                        if let Some(file) = record.as_mut() {
+                        if let Some(gzip) = gzip.as_mut() {
                             let elapsed = now.elapsed().unwrap();
                             now = SystemTime::now();
 
-                            file.write_u32::<NetworkEndian>(elapsed.subsec_nanos())
+                            gzip.write_u32::<NetworkEndian>(elapsed.subsec_nanos())
                                 .expect("cannot write recording");
-                            file.write_u32::<NetworkEndian>(buf.len() as u32)
+                            gzip.write_u32::<NetworkEndian>(buf.len() as u32)
                                 .expect("cannot write recording");
-                            file.write_all(&buf[..])
+                            gzip.write_all(&buf[..])
                                 .expect("cannot write recording");
-                            file.flush()
-                                .expect("cannot flush recording");
                         }
-                        sender.send(Some(buf))
-                              .expect("cannot send buffer");
+                        match sender.send(Some(buf)) {
+                            Ok(()) => (),
+                            Err(_) => break
+                        }
                     }
                     Err(_) => {
-                        sender.send(None)
-                              .expect("cannot send buffer");
+                        match sender.send(None) {
+                            Ok(()) => (),
+                            Err(_) => break
+                        }
                     }
                 }
             }
+
+            if let Some(gzip) = gzip {
+                gzip.finish().expect("cannot finish recording");
+            }
         });
 
-        Device(receiver)
+        (Device(receiver), thread)
     }
 
-    fn new_replay(mut file: File) -> Device {
+    fn new_replay(file: File) -> (Device, JoinHandle<()>) {
         let (sender, receiver) = channel();
-        thread::spawn(move || {
+        let thread = thread::spawn(move || {
+            let mut gzip = flate2::read::GzDecoder::new(file);
+
             loop {
-                match file.read_u32::<NetworkEndian>() {
+                match gzip.read_u32::<NetworkEndian>() {
                     Ok(nanos) => thread::sleep(Duration::from_nanos(nanos as u64)),
                     Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
                     r => { r.expect("cannot read recording"); () }
                 }
-                let length = file.read_u32::<NetworkEndian>()
+                let length = gzip.read_u32::<NetworkEndian>()
                                  .expect("cannot read recording") as usize;
                 let mut data = Vec::new();
                 data.resize(length, 0);
-                file.read(&mut data[..]).expect("cannot read recording");
+                gzip.read_exact(&mut data[..]).expect("cannot read recording");
                 sender.send(Some(data))
                       .expect("cannot send buffer");
             }
@@ -124,7 +139,7 @@ impl Device {
             }
         });
 
-        Device(receiver)
+        (Device(receiver), thread)
     }
 }
 
@@ -380,7 +395,7 @@ fn main() {
         File::create(filename).expect("cannot open record file"));
 
     let context = libusb::Context::new().unwrap();
-    let device = match config.stream.replay {
+    let (device, device_thread) = match config.stream.replay {
         Some(filename) => {
             let replay_file = File::open(filename).expect("cannot open replay file");
             Device::new_replay(replay_file)
@@ -521,6 +536,9 @@ fn main() {
             }
         }
     }
+
+    drop(reader);
+    device_thread.join().expect("cannot join device thread");
 
     #[cfg(feature = "x264")] {
         if let Some((h264_encoder, h264_thread)) = h264_video {

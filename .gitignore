@@ -3,4 +3,5 @@
 /config.toml
 /*.gif
 /*.bin
+/*.bin.gz
 /*.h264
