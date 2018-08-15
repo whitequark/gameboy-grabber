@@ -171,7 +171,7 @@ impl<R: Read> VideoStream<R> {
         while sync & 0x80 == 0 {
             sync = self.read_byte();
         }
-        let overflow = (sync & 0x70) >> 7;
+        let overflow = (sync & 0x40) >> 7;
         let n_frame  = (sync & 0x3e) >> 1;
         let n_row    = (sync & 0x01) << 7 | self.read_data_byte()?;
         Ok(Header {
