@@ -1,0 +1,4 @@
+/target
+/frames/*
+/config.toml
+/*.gif

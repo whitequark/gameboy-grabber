@@ -1,0 +1,30 @@
+# Frame size.
+# For CGB:
+# width = 160
+# height = 144
+# For GBA:
+# width = 240
+# height = 160
+
+# Drop every N-th frame (N < 32).
+# framedrop = 0
+
+# Display frames on screen.
+# [video.sdl]
+# Expand every captured pixel into an NxN pixel rectangle before display.
+# scale = 1
+
+# Play audio via speakers.
+# [audio.sdl]
+
+# Record frames to an animated gif file.
+# [video.gif]
+# filename = "capture.gif"
+
+# Record frames to an H.264 stream.
+# [video.h264]
+# filename = "capture.h264"
+
+# Record audio to a WAV file.
+# [audio.wav]
+# filename = "capture.wav"
