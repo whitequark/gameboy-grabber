@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 #[macro_use]
 extern crate serde_derive;
 extern crate toml;
@@ -12,16 +14,45 @@ use std::fs::{self, File};
 use std::thread;
 use std::sync::mpsc::{channel, Sender, Receiver};
 
+const VID_QIHW: u16        = 0x20b7;
+const PID_GLASGOW: u16     = 0x9db1;
+
+const REQ_TYPE_VENDOR: u8  = 0x40;
+
+const REQ_EEPROM: u8       = 0x10;
+const REQ_FPGA_CFG: u8     = 0x11;
+const REQ_STATUS: u8       = 0x12;
+const REQ_REGISTER: u8     = 0x13;
+const REQ_IO_VOLT: u8      = 0x14;
+const REQ_SENSE_VOLT: u8   = 0x15;
+const REQ_ALERT_VOLT: u8   = 0x16;
+const REQ_POLL_ALERT: u8   = 0x17;
+const REQ_BITSTREAM_ID: u8 = 0x18;
+const REQ_IOBUF_ENABLE: u8 = 0x19;
+const REQ_LIMIT_VOLT: u8   = 0x1A;
+
+const PORT_A: u16 = 0x01;
+const PORT_B: u16 = 0x02;
+
 struct Device(Receiver<Vec<u8>>);
 
 impl Device {
-    fn new(context: libusb::Context) -> Device {
+    fn new(context: libusb::Context, bitstream: Vec<u8>) -> Device {
         let (sender, receiver) = channel();
         thread::spawn(move || {
-            let mut handle = context.open_device_with_vid_pid(0x20b7, 0x9db1)
+            let mut handle = context.open_device_with_vid_pid(VID_QIHW, PID_GLASGOW)
                                     .expect("cannot open device");
-            handle.write_control(0x40, 0x14, 0x00, 0x03, &[0xe4, 0x0c], Default::default())
+            handle.write_control(REQ_TYPE_VENDOR, REQ_IO_VOLT, 0x00, PORT_A|PORT_B,
+                                 &[0xe4, 0x0c], Default::default())
                   .expect("cannot set port AB voltage to 3V3");
+            for (index, chunk) in bitstream.chunks(1024).enumerate() {
+                handle.write_control(REQ_TYPE_VENDOR, REQ_FPGA_CFG, 0, index as u16, chunk,
+                                     Default::default())
+                      .expect("cannot download bitstream chunk");
+            }
+            handle.write_control(REQ_TYPE_VENDOR, REQ_BITSTREAM_ID, 0, 0, &[0xff; 16],
+                                 Default::default())
+                  .expect("cannot configure FPGA");
             handle.set_active_configuration(1)
                   .expect("cannot set configuration");
             handle.detach_kernel_driver(0)
@@ -31,7 +62,7 @@ impl Device {
             loop {
                 let mut buf = Vec::new();
                 buf.resize(512, 0);
-                handle.read_bulk(0x86, &mut buf[..], Duration::from_millis(1000))
+                handle.read_bulk(0x86, &mut buf[..], Duration::from_millis(100))
                       .expect("cannot read buffer");
                 sender.send(buf)
                       .expect("cannot send buffer");
@@ -122,10 +153,9 @@ impl<R: Read> VideoStream<R> {
 
 #[derive(Debug, Default, Deserialize)]
 struct Config {
+    bitstream: String,
     width: usize,
     height: usize,
-    #[serde(default)]
-    framedrop: u8,
     video: VideoConfig,
     // audio: AudioConfig,
 }
@@ -144,7 +174,9 @@ struct SdlVideoConfig {
 
 #[derive(Debug, Default, Deserialize)]
 struct GifVideoConfig {
-    filename: String
+    filename: String,
+    #[serde(default)]
+    framedrop: u8,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -223,7 +255,7 @@ fn main() {
     let pitch = width * 3;
 
     let context = libusb::Context::new().unwrap();
-    let device = Device::new(context);
+    let device = Device::new(context, fs::read(config.bitstream).expect("cannot read bitstream"));
     let mut reader = VideoStream::new(BufReader::with_capacity(512, device), pitch);
 
     let sdl_context = sdl2::init().expect("cannot initialize SDL");
@@ -246,8 +278,8 @@ fn main() {
         None =>
             gif_video = None,
 
-        Some(GifVideoConfig { filename }) =>
-            gif_video = Some(spawn_gif_encoder(width, height, config.framedrop, &filename))
+        Some(GifVideoConfig { filename, framedrop }) =>
+            gif_video = Some(spawn_gif_encoder(width, height, framedrop, &filename))
     }
 
     let mut current_n_frame = 0;

@@ -1,13 +1,11 @@
-# Frame size.
 # For CGB:
+# bitstream = "bitstream/cgb.bin"
 # width = 160
 # height = 144
 # For GBA:
+# bitstream = "bitstream/gba.bin"
 # width = 240
 # height = 160
-
-# Drop every N-th frame (N < 32).
-# framedrop = 0
 
 # Display frames on screen.
 # [video.sdl]
@@ -17,9 +15,11 @@
 # Play audio via speakers.
 # [audio.sdl]
 
-# Record frames to an animated gif file.
 # [video.gif]
+# Record frames to an animated gif file.
 # filename = "capture.gif"
+# Drop every N-th frame (N < 32).
+# framedrop = 0
 
 # Record frames to an H.264 stream.
 # [video.h264]
