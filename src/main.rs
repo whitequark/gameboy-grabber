@@ -233,7 +233,7 @@ struct Config {
     #[serde(rename = "device-type")]
     device_type: String,
     device: BTreeMap<String, DeviceConfig>,
-    stream: StreamConfig,
+    stream: Option<StreamConfig>,
     video: VideoConfig,
     // audio: AudioConfig,
 }
@@ -390,17 +390,21 @@ fn main() {
     let (width, height) = (device.width, device.height);
     let pitch = width * 3;
 
-    let bitstream = fs::read(&device.bitstream).expect("cannot read bitstream");
-    let record_file = config.stream.record.map(|filename|
-        File::create(filename).expect("cannot open record file"));
-
     let context = libusb::Context::new().unwrap();
-    let (device, device_thread) = match config.stream.replay {
-        Some(filename) => {
+    let (device, device_thread) = match config.stream {
+        Some(StreamConfig { replay: Some(filename), .. }) => {
             let replay_file = File::open(filename).expect("cannot open replay file");
             Device::new_replay(replay_file)
         }
-        None => Device::new(context, bitstream, record_file)
+        _ => {
+            let record_file = match config.stream {
+                Some(StreamConfig { record: Some(filename), .. }) =>
+                    Some(File::create(filename).expect("cannot open record file")),
+                _ => None
+            };
+            let bitstream = fs::read(&device.bitstream).expect("cannot read bitstream");
+            Device::new(context, bitstream, record_file)
+        }
     };
     let mut reader = VideoStream::new(BufReader::with_capacity(BUF_SIZE, device), pitch);
 
