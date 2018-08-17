@@ -5,3 +5,5 @@
 /*.bin
 /*.bin.gz
 /*.h264
+/avr-adc/*.vcd
+/avr-adc/*.elf
