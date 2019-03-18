@@ -45,7 +45,7 @@ const BUF_SIZE: usize = 16384;
 struct Device(Receiver<Option<Vec<u8>>>);
 
 impl Device {
-    fn new(context: libusb::Context, bitstream: Vec<u8>, record: Option<File>)
+    fn new(context: libusb::Context, bitstream: Option<Vec<u8>>, record: Option<File>)
           -> (Device, JoinHandle<()>) {
         let (sender, receiver) = channel();
         let thread = thread::spawn(move || {
@@ -54,14 +54,19 @@ impl Device {
             handle.write_control(REQ_TYPE_VENDOR, REQ_IO_VOLT, 0x00, PORT_A|PORT_B,
                                  &[0xe4, 0x0c], Default::default())
                   .expect("cannot set port AB voltage to 3V3");
-            for (index, chunk) in bitstream.chunks(1024).enumerate() {
-                handle.write_control(REQ_TYPE_VENDOR, REQ_FPGA_CFG, 0, index as u16, chunk,
-                                     Default::default())
-                      .expect("cannot download bitstream chunk");
+            match bitstream {
+                Some(bitstream) => {
+                    for (index, chunk) in bitstream.chunks(1024).enumerate() {
+                        handle.write_control(REQ_TYPE_VENDOR, REQ_FPGA_CFG, 0, index as u16, chunk,
+                                             Default::default())
+                              .expect("cannot download bitstream chunk");
+                    }
+                    handle.write_control(REQ_TYPE_VENDOR, REQ_BITSTREAM_ID, 0, 0, &[0xff; 16],
+                                         Default::default())
+                          .expect("cannot configure FPGA");
+                }
+                None => ()
             }
-            handle.write_control(REQ_TYPE_VENDOR, REQ_BITSTREAM_ID, 0, 0, &[0xff; 16],
-                                 Default::default())
-                  .expect("cannot configure FPGA");
             handle.set_active_configuration(1)
                   .expect("cannot set configuration");
             handle.detach_kernel_driver(0)
@@ -240,7 +245,7 @@ struct Config {
 
 #[derive(Debug, Default, Deserialize)]
 struct DeviceConfig {
-    bitstream: String,
+    bitstream: Option<String>,
     width: usize,
     height: usize,
 }
@@ -402,7 +407,8 @@ fn main() {
                     Some(File::create(filename).expect("cannot open record file")),
                 _ => None
             };
-            let bitstream = fs::read(&device.bitstream).expect("cannot read bitstream");
+            let bitstream = device.bitstream.as_ref().map(|path|
+                fs::read(path).expect("cannot read bitstream"));
             Device::new(context, bitstream, record_file)
         }
     };
