@@ -73,6 +73,8 @@ impl Device {
                   .unwrap_or(/* ok if it didn't work */());
             handle.claim_interface(0)
                   .expect("cannot claim interface");
+            handle.set_alternate_setting(0, 1)
+                  .expect("cannot set alt setting");
 
             let mut gzip = record.map(|file| {
                 flate2::write::GzEncoder::new(file, flate2::Compression::fast())
