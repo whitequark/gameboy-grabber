@@ -40,7 +40,8 @@ const REQ_LIMIT_VOLT: u8   = 0x1A;
 const PORT_A: u16 = 0x01;
 const PORT_B: u16 = 0x02;
 
-const BUF_SIZE: usize = 16384;
+const BUF_SIZE:  usize = 2048;
+const BUF_COUNT: usize = 16;
 
 struct Device(Receiver<Option<Vec<u8>>>);
 
@@ -76,34 +77,47 @@ impl Device {
             handle.set_alternate_setting(0, 1)
                   .expect("cannot set alt setting");
 
+            let mut buffers = vec![vec![0; BUF_SIZE]; BUF_COUNT];
+            let mut async_group = libusb::AsyncGroup::new(&context);
+            for buffer in buffers.iter_mut() {
+                let transfer = libusb::Transfer::bulk(&handle, 0x86, &mut buffer[..],
+                                                      Duration::from_millis(100));
+                async_group.submit(transfer).expect("cannot submit transfer");
+            }
+
             let mut gzip = record.map(|file| {
                 flate2::write::GzEncoder::new(file, flate2::Compression::fast())
             });
 
             let mut now = SystemTime::now();
             loop {
-                let mut buf = Vec::new();
-                buf.resize(BUF_SIZE, 0);
-                match handle.read_bulk(0x86, &mut buf[..], Duration::from_millis(100)) {
-                    Ok(size) => {
-                        buf.resize(size, 0);
-                        if let Some(gzip) = gzip.as_mut() {
-                            let elapsed = now.elapsed().unwrap();
-                            now = SystemTime::now();
+                match async_group.wait_any() {
+                    Ok(mut transfer) => {
+                        let data;
+                        if transfer.status() == libusb::TransferStatus::Success {
+                            let buffer = transfer.actual();
+                            if let Some(gzip) = gzip.as_mut() {
+                                let elapsed = now.elapsed().unwrap();
+                                now = SystemTime::now();
 
-                            gzip.write_u32::<NetworkEndian>(elapsed.subsec_nanos())
-                                .expect("cannot write recording");
-                            gzip.write_u32::<NetworkEndian>(buf.len() as u32)
-                                .expect("cannot write recording");
-                            gzip.write_all(&buf[..])
-                                .expect("cannot write recording");
+                                gzip.write_u32::<NetworkEndian>(elapsed.subsec_nanos())
+                                    .expect("cannot write recording");
+                                gzip.write_u32::<NetworkEndian>(buffer.len() as u32)
+                                    .expect("cannot write recording");
+                                gzip.write_all(&buffer[..])
+                                    .expect("cannot write recording");
+                            }
+                            data = Some(buffer.to_owned());
+                        } else {
+                            data = None;
                         }
-                        match sender.send(Some(buf)) {
+                        match sender.send(data) {
                             Ok(()) => (),
                             Err(_) => break
                         }
+                        async_group.submit(transfer).expect("cannot submit transfer");
                     }
-                    Err(_) => {
+                    _ => {
                         match sender.send(None) {
                             Ok(()) => (),
                             Err(_) => break

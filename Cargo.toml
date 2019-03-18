@@ -9,7 +9,7 @@ serde_derive = "1.0"
 byteorder = "1.0"
 flate2 = "1.0"
 toml = "0.4"
-libusb = "0.3"
+libusb = { version = "0.3", git = "https://github.com/whitequark/libusb-rs", branch = "async" }
 sdl2 = "0.31"
 gif = "0.10"
 x264 = { version = "0.3", optional = true }
