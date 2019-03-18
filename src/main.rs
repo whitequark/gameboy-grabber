@@ -68,6 +68,9 @@ impl Device {
                 }
                 None => ()
             }
+            handle.write_control(REQ_TYPE_VENDOR, REQ_REGISTER, 0, 0, &[0x01],
+                                 Default::default())
+                  .expect("cannot assert reset");
             handle.set_active_configuration(1)
                   .expect("cannot set configuration");
             handle.detach_kernel_driver(0)
@@ -76,6 +79,9 @@ impl Device {
                   .expect("cannot claim interface");
             handle.set_alternate_setting(0, 1)
                   .expect("cannot set alt setting");
+            handle.write_control(REQ_TYPE_VENDOR, REQ_REGISTER, 0, 0, &[0x00],
+                                 Default::default())
+                  .expect("cannot deassert reset");
 
             let mut buffers = vec![vec![0; BUF_SIZE]; BUF_COUNT];
             let mut async_group = libusb::AsyncGroup::new(&context);
@@ -466,7 +472,7 @@ fn main() {
     }
 
     let mut current_n_frame = 0;
-    let mut current_n_row = 0;
+    let mut current_n_row = height - 1;
     let mut framebuffer = vec![0u8; pitch * height];
     let mut framebuffer_full = framebuffer.clone();
     let mut skip_frame = false;
